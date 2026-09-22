@@ -42,6 +42,20 @@ pub fn build(b: *std.Build) !void {
     // (See root Ghostty build.zig on why we do this)
     try flags.append(b.allocator, "-DSIMDUTF_IMPLEMENTATION_ICELAKE=0");
 
+    // Force function-local statics for simdutf's global state instead of
+    // translation-unit-scope statics with dynamic initializers. The
+    // Windows shared-lib link discards the `.CRT$XCU` dynamic
+    // initializers (nothing roots them), leaving
+    // `available_implementations_instance` and
+    // `active_implementation_instance` zero-filled — which makes the
+    // first non-ASCII conversion take a null-`this` virtual call
+    // (ASCII never reaches simdutf, so ASCII-only tests stay green).
+    // Function-local statics self-initialize thread-safely on first
+    // call, so no load-time initialization is required. This is also
+    // simdutf's default whenever libc++ is present; we only override
+    // the no-libcxx special case.
+    try flags.append(b.allocator, "-DSIMDUTF_USE_STATIC_INITIALIZATION=0");
+
     // Fixes linker issues for release builds missing ubsanitizer symbols
     try flags.appendSlice(b.allocator, &.{
         "-fno-sanitize=undefined",

@@ -61,15 +61,37 @@ on both.
   (`vt_write split combining mark after base at right edge`) splits the
   sequence across two calls — the surviving shape.
 
-## Suggested fix
+## Root cause (confirmed)
 
-Retain the vendored simdutf (and highway — same exposure) objects when
-linking the `ghostty-vt` shared library on Windows: whole-archive the
-simdutf static lib into the DLL link in
-`src/build/GhosttyLibVt.zig` (`/WHOLEARCHIVE` for the MSVC/LLD link), or
-add an explicit load-time reference to the kernel implementations so
-`/OPT:REF` section-GC keeps them. The test-exe link keeps them (different
-GC roots), which is why this manifests only in the shipped DLL.
+The `.CRT` section of the shipped DLL contains a single pointer where
+dozens of C++ dynamic initializers should be registered — the Windows
+shared-lib link discards simdutf's `.CRT$XCU` initializer sections
+(nothing roots them). Ghostty builds vendored simdutf with
+`-DSIMDUTF_NO_LIBCXX`, which flips simdutf into
+`SIMDUTF_USE_STATIC_INITIALIZATION=1` (translation-unit-scope statics
+with dynamic initializers). With the initializers gone,
+`available_implementations_instance` and `active_implementation_instance`
+stay zero-filled: `avail=0, active=null` at runtime (traced), and the
+first conversion dies in the null-`this` call above. The test EXE runs
+its initializers normally, which is why the suites stay green.
+
+## Fix (verified)
+
+One flag in `pkg/simdutf/build.zig`: `-DSIMDUTF_USE_STATIC_INITIALIZATION=0`.
+This restores simdutf's default (function-local statics, self-initializing
+thread-safely on first call — no load-time initialization required). With
+it, the same repro passes every case (`avail=1, active non-null`). This
+branch carries that patch (uncommitted state: see `pkg/simdutf/build.zig`;
+the `win-vt-simdutf-fix-1.3` branch backports it to the 1.3-era tree for
+consumers pinned to the old C API).
 
 Workaround until fixed: build with `-Dsimd=false` (verified: all repro
 cases pass; scalar Zig decoder handles everything, just slower).
+
+## Suggested upstream fix
+
+Adopt the `SIMDUTF_USE_STATIC_INITIALIZATION=0` override above for the
+Windows shared-lib build. Separately worth investigating why `.CRT$XCU`
+initializers are dropped from the DLL link while the EXE link keeps
+them — that gap is the deeper bug and may bite other C++ dependencies
+too.
